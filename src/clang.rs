@@ -10,7 +10,7 @@ use std::ffi::{CStr, CString};
 use std::fmt;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::os::raw::{c_char, c_int, c_longlong, c_uint, c_ulong};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 
 /// A cursor into the Clang AST, pointing to an AST node.
 ///
@@ -30,14 +30,6 @@ impl fmt::Debug for Cursor {
                self.usr())
     }
 }
-
-/// A cursor visitor function.
-///
-/// The first argument is the AST node currently being visited. The second
-/// argument is the parent of the AST node currently being visited. The return
-/// value informs how traversal should proceed.
-pub type CursorVisitor<'s> = for<'a, 'b> FnMut(&'a Cursor, &'b Cursor)
-                                               -> Enum_CXChildVisitResult + 's;
 
 impl Cursor {
     /// Get the Unified Symbol Resolution for this cursor's referent, if
@@ -109,7 +101,9 @@ impl Cursor {
     /// See documentation for `lexical_parent` for details on semantic vs
     /// lexical parents.
     pub fn fallible_semantic_parent(&self) -> Option<Cursor> {
-        let sp = self.semantic_parent();
+        let sp = unsafe {
+            Cursor { x: clang_getCursorSemanticParent(self.x) }
+        };
         if sp == *self || !sp.is_valid() {
             return None;
         }
@@ -121,11 +115,7 @@ impl Cursor {
     /// See documentation for `lexical_parent` for details on semantic vs
     /// lexical parents.
     pub fn semantic_parent(&self) -> Cursor {
-        unsafe {
-            Cursor {
-                x: clang_getCursorSemanticParent(self.x),
-            }
-        }
+        self.fallible_semantic_parent().unwrap()
     }
 
     /// Return the number of template arguments used by this cursor's referent,
@@ -165,17 +155,18 @@ impl Cursor {
 
     /// Is the referent a top level construct?
     pub fn is_toplevel(&self) -> bool {
-        let mut semantic_parent = self.semantic_parent();
+        let mut semantic_parent = self.fallible_semantic_parent();
 
-        while semantic_parent.kind() == CXCursor_Namespace ||
-              semantic_parent.kind() == CXCursor_NamespaceAlias ||
-              semantic_parent.kind() == CXCursor_NamespaceRef {
-            semantic_parent = semantic_parent.semantic_parent();
+        while semantic_parent.is_some() &&
+              (semantic_parent.unwrap().kind() == CXCursor_Namespace ||
+               semantic_parent.unwrap().kind() == CXCursor_NamespaceAlias ||
+               semantic_parent.unwrap().kind() == CXCursor_NamespaceRef) {
+            semantic_parent = semantic_parent.unwrap().fallible_semantic_parent();
         }
 
         let tu = self.translation_unit();
-        // Yes, the second can happen with, e.g., macro definitions.
-        semantic_parent == tu || semantic_parent == tu.semantic_parent()
+        // Yes, this can happen with, e.g., macro definitions.
+        semantic_parent == tu.fallible_semantic_parent()
     }
 
     /// Get the kind of referent this cursor is pointing to.
@@ -190,7 +181,7 @@ impl Cursor {
 
     /// Is the referent a template specialization?
     pub fn is_template(&self) -> bool {
-        self.specialized().is_valid()
+        self.specialized().is_some()
     }
 
     /// Is the referent a fully specialized template specialization without any
@@ -257,11 +248,13 @@ impl Cursor {
     /// Given that this cursor's referent is a reference to another type, or is
     /// a declaration, get the cursor pointing to the referenced type or type of
     /// the declared thing.
-    pub fn definition(&self) -> Cursor {
+    pub fn definition(&self) -> Option<Cursor> {
         unsafe {
-            Cursor {
+            let ret = Cursor {
                 x: clang_getCursorDefinition(self.x),
-            }
+            };
+
+            if ret.is_valid() { Some(ret) } else { None }
         }
     }
 
@@ -290,11 +283,12 @@ impl Cursor {
 
     /// Given that this cursor points to a template specialization, get a cursor
     /// pointing to the template definition that is being specialized.
-    pub fn specialized(&self) -> Cursor {
+    pub fn specialized(&self) -> Option<Cursor> {
         unsafe {
-            Cursor {
+            let ret = Cursor {
                 x: clang_getSpecializedCursorTemplate(self.x),
-            }
+            };
+            if ret.is_valid() { Some(ret) } else { None }
         }
     }
 
@@ -306,21 +300,14 @@ impl Cursor {
 
     /// Traverse this cursor's referent and its children.
     ///
-    /// Call the given function on each AST node traversed. See `CursorVisitor`
-    /// for details on arguments passed to the function and how its return value
-    /// is interpreted.
-    pub fn visit<F>(&self, func: F)
-        where F: for<'a, 'b> FnMut(&'a Cursor, &'b Cursor)
-                                   -> Enum_CXChildVisitResult,
+    /// Call the given function on each AST node traversed.
+    pub fn visit<Visitor>(&self, mut visitor: Visitor)
+        where Visitor: FnMut(Cursor) -> Enum_CXChildVisitResult,
     {
-        let mut data: Box<CursorVisitor> = Box::new(func);
-        let opt_visit =
-            Some(visit_children as extern "C" fn(CXCursor,
-                                                 CXCursor,
-                                                 CXClientData)
-                                                 -> Enum_CXChildVisitResult);
         unsafe {
-            clang_visitChildren(self.x, opt_visit, mem::transmute(&mut data));
+            clang_visitChildren(self.x,
+                                Some(visit_children::<Visitor>),
+                                mem::transmute(&mut visitor));
         }
     }
 
@@ -361,20 +348,28 @@ impl Cursor {
 
     /// Get the signed constant value for this cursor's enum variant referent.
     ///
-    /// Returns `LLONG_MIN` if the cursor's referent is not an enum variant,
-    /// which is also a valid enum value, so callers should check the cursor
-    /// kind before calling this method (see issue #127).
-    pub fn enum_val_signed(&self) -> i64 {
-        unsafe { clang_getEnumConstantDeclValue(self.x) as i64 }
+    /// Returns None if the cursor's referent is not an enum variant.
+    pub fn enum_val_signed(&self) -> Option<i64> {
+        unsafe {
+            if self.kind() == CXCursor_EnumConstantDecl {
+                Some(clang_getEnumConstantDeclValue(self.x) as i64)
+            } else {
+                None
+            }
+        }
     }
 
     /// Get the unsigned constant value for this cursor's enum variant referent.
     ///
-    /// Returns `ULLONG_MAX` if the cursor's referent is not an enum variant,
-    /// which is also a valid enum value, so callers should check the cursor
-    /// kind before calling this method (see issue #128).
-    pub fn enum_val_unsigned(&self) -> u64 {
-        unsafe { clang_getEnumConstantDeclUnsignedValue(self.x) as u64 }
+    /// Returns None if the cursor's referent is not an enum variant.
+    pub fn enum_val_unsigned(&self) -> Option<u64> {
+        unsafe { 
+            if self.kind() == CXCursor_EnumConstantDecl {
+                Some(clang_getEnumConstantDeclUnsignedValue(self.x) as u64)   
+            } else {
+                None
+            }
+        }
     }
 
     /// Given that this cursor's referent is a `typedef`, get the `Type` that is
@@ -411,16 +406,6 @@ impl Cursor {
                 });
             }
             args
-        }
-    }
-
-    /// Given that this cursor's referent is a function/method call or
-    /// declaration, return a cursor to its return type.
-    pub fn ret_type(&self) -> Type {
-        unsafe {
-            Type {
-                x: clang_getCursorResultType(self.x),
-            }
         }
     }
 
@@ -466,35 +451,20 @@ impl Cursor {
     pub fn is_virtual_base(&self) -> bool {
         unsafe { clang_isVirtualBase(self.x) != 0 }
     }
-
-    /// Given that this cursor's referent is a template specialization or
-    /// declaration, get the `i`th template argument kind.
-    ///
-    /// If the referent is not a template or `i` is out of bounds, an invalid
-    /// kind is returned.
-    pub fn template_arg_kind(&self, i: c_int) -> CXTemplateArgumentKind {
-        unsafe { clang_Cursor_getTemplateArgumentKind(self.x, i as c_uint) }
-    }
-
-    /// Given that this cursor's referent is a template specialization, and that
-    /// the `i`th template argument is an integral, get the `i`th template
-    /// argument value.
-    pub fn template_arg_value(&self, i: c_int) -> c_longlong {
-        unsafe { clang_Cursor_getTemplateArgumentValue(self.x, i as c_uint) }
-    }
 }
 
-extern "C" fn visit_children(cur: CXCursor,
-                             parent: CXCursor,
-                             data: CXClientData)
-                             -> Enum_CXChildVisitResult {
-    let func: &mut Box<CursorVisitor> = unsafe { mem::transmute(data) };
-    (*func)(&Cursor {
-                x: cur,
-            },
-            &Cursor {
-                x: parent,
-            })
+extern "C" fn visit_children<Visitor>(cur: CXCursor,
+                                      _parent: CXCursor,
+                                      data: CXClientData)
+                                      -> Enum_CXChildVisitResult
+    where Visitor: FnMut(Cursor) -> Enum_CXChildVisitResult,
+{
+    let func: &mut Visitor = unsafe { mem::transmute(data) };
+    let child = Cursor {
+        x: cur,
+    };
+
+    (*func)(child)
 }
 
 impl PartialEq for Cursor {
@@ -660,11 +630,19 @@ impl Type {
 
     /// Given that this type is a pointer type, return the type that it points
     /// to.
-    pub fn pointee_type(&self) -> Type {
-        unsafe {
-            Type {
-                x: clang_getPointeeType(self.x),
+    pub fn pointee_type(&self) -> Option<Type> {
+        match self.kind() {
+            CXType_Pointer |
+            CXType_RValueReference |
+            CXType_LValueReference |
+            CXType_MemberPointer => {
+                let ret = Type {
+                    x: unsafe { clang_getPointeeType(self.x) },
+                };
+                debug_assert!(ret.is_valid());
+                Some(ret)
             }
+            _ => None,
         }
     }
 
@@ -674,7 +652,7 @@ impl Type {
         let current_type = Type {
             x: unsafe { clang_getElementType(self.x) },
         };
-        if current_type.kind() != CXType_Invalid {
+        if current_type.is_valid() {
             Some(current_type)
         } else {
             None
@@ -713,10 +691,10 @@ impl Type {
         let rt = Type {
             x: unsafe { clang_getResultType(self.x) },
         };
-        if rt.kind() == CXType_Invalid {
-            None
-        } else {
+        if rt.is_valid() {
             Some(rt)
+        } else {
+            None
         }
     }
 
@@ -735,6 +713,11 @@ impl Type {
                 x: clang_Type_getNamedType(self.x),
             }
         }
+    }
+
+    /// Is this a valid type?
+    pub fn is_valid(&self) -> bool {
+        self.kind() != CXType_Invalid
     }
 }
 
@@ -1184,7 +1167,12 @@ pub fn ast_dump(c: &Cursor, depth: isize) -> Enum_CXVisitorResult {
                           kind_to_str(c.kind()),
                           c.spelling(),
                           type_to_str(ct)));
-    c.visit(|s, _: &Cursor| ast_dump(s, depth + 1));
+    c.visit(|s| ast_dump(&s, depth + 1));
     print_indent(depth, ")");
     CXChildVisit_Continue
+}
+
+/// Try to extract the clang version to a string
+pub fn extract_clang_version() -> String {
+    unsafe { clang_getClangVersion().into() }
 }

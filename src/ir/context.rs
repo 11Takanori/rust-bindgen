@@ -4,7 +4,7 @@ use BindgenOptions;
 use clang::{self, Cursor};
 use parse::ClangItemParser;
 use std::borrow::{Borrow, Cow};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::collections::btree_map::{self, BTreeMap};
 use std::fmt;
 use super::int::IntKind;
@@ -221,7 +221,7 @@ impl<'ctx> BindgenContext<'ctx> {
     /// Mangles a name so it doesn't conflict with any keyword.
     pub fn rust_mangle<'a>(&self, name: &'a str) -> Cow<'a, str> {
         use syntax::parse::token;
-        let ident = self.rust_ident_raw(&name);
+        let ident = self.rust_ident_raw(name);
         let token = token::Ident(ident);
         if token.is_any_keyword() || name.contains("@") ||
            name.contains("?") || name.contains("$") ||
@@ -242,9 +242,7 @@ impl<'ctx> BindgenContext<'ctx> {
     }
 
     /// Returns a mangled name as a rust identifier.
-    pub fn rust_ident_raw<S>(&self, name: &S) -> Ident
-        where S: Borrow<str>,
-    {
+    pub fn rust_ident_raw(&self, name: &str) -> Ident {
         self.ext_cx().ident_of(name.borrow())
     }
 
@@ -308,6 +306,7 @@ impl<'ctx> BindgenContext<'ctx> {
     /// `replaces="SomeType"` annotation with the replacement type.
     fn process_replacements(&mut self) {
         if self.replacements.is_empty() {
+            debug!("No replacements to process");
             return;
         }
 
@@ -319,23 +318,27 @@ impl<'ctx> BindgenContext<'ctx> {
         let mut replacements = vec![];
 
         for (id, item) in self.items.iter() {
+            // Calls to `canonical_name` are expensive, so eagerly filter out
+            // items that cannot be replaced.
             let ty = match item.kind().as_type() {
                 Some(ty) => ty,
                 None => continue,
             };
 
-            // canonical_name calls are expensive.
-            let ci = match ty.as_comp() {
-                Some(ci) => ci,
-                None => continue,
-            };
-
-            if ci.is_template_specialization() {
-                continue;
+            match *ty.kind() {
+                TypeKind::Comp(ref ci) if !ci.is_template_specialization() => {}
+                TypeKind::TemplateAlias(_, _) |
+                TypeKind::Alias(_, _) => {}
+                _ => continue,
             }
 
-            if let Some(replacement) = self.replacements
-                .get(&item.canonical_name(self)) {
+            let name = item.real_canonical_name(self,
+                                                self.options()
+                                                    .enable_cxx_namespaces,
+                                                true);
+            let replacement = self.replacements.get(&name);
+
+            if let Some(replacement) = replacement {
                 if replacement != id {
                     // We set this just after parsing the annotation. It's
                     // very unlikely, but this can happen.
@@ -347,6 +350,8 @@ impl<'ctx> BindgenContext<'ctx> {
         }
 
         for (id, replacement) in replacements {
+            debug!("Replacing {:?} with {:?}", id, replacement);
+
             let mut item = self.items.get_mut(&id).unwrap();
             *item.kind_mut().as_type_mut().unwrap().kind_mut() =
                 TypeKind::ResolvedTypeRef(replacement);
@@ -492,15 +497,21 @@ impl<'ctx> BindgenContext<'ctx> {
         use clangll::*;
         let mut args = vec![];
         let mut found_invalid_template_ref = false;
-        location.visit(|c, _| {
+        location.visit(|c| {
             if c.kind() == CXCursor_TemplateRef &&
                c.cur_type().kind() == CXType_Invalid {
                 found_invalid_template_ref = true;
             }
             if c.kind() == CXCursor_TypeRef {
+                // The `with_id` id will potentially end up unused if we give up
+                // on this type (for example, its a tricky partial template
+                // specialization), so if we pass `with_id` as the parent, it is
+                // potentially a dangling reference. Instead, use the canonical
+                // template declaration as the parent. It is already parsed and
+                // has a known-resolvable `ItemId`.
                 let new_ty = Item::from_ty_or_ref(c.cur_type(),
-                                                  Some(*c),
-                                                  Some(with_id),
+                                                  Some(c),
+                                                  Some(wrapping),
                                                   self);
                 args.push(new_ty);
             }
@@ -725,7 +736,21 @@ impl<'ctx> BindgenContext<'ctx> {
     /// Replacement types are declared using the `replaces="xxx"` annotation,
     /// and implies that the original type is hidden.
     pub fn replace(&mut self, name: &str, potential_ty: ItemId) {
-        self.replacements.insert(name.into(), potential_ty);
+        match self.replacements.entry(name.into()) {
+            hash_map::Entry::Vacant(entry) => {
+                debug!("Defining replacement for {} as {:?}",
+                       name,
+                       potential_ty);
+                entry.insert(potential_ty);
+            }
+            hash_map::Entry::Occupied(occupied) => {
+                warn!("Replacement for {} already defined as {:?}; \
+                       ignoring duplicate replacement definition as {:?}}}",
+                      name,
+                      occupied.get(),
+                      potential_ty);
+            }
+        }
     }
 
     /// Is the item with the given `name` hidden? Or is the item with the given
@@ -883,6 +908,16 @@ impl<'ctx> BindgenContext<'ctx> {
             ctx: self,
             seen: seen,
             to_iterate: to_iterate,
+        }
+    }
+
+    /// Convenient method for getting the prefix to use for most traits in
+    /// codegen depending on the `use_core` option.
+    pub fn trait_prefix(&self) -> Ident {
+        if self.options().use_core {
+            self.rust_ident_raw("core")
+        } else {
+            self.rust_ident_raw("std")
         }
     }
 }

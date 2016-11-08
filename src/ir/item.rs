@@ -49,7 +49,9 @@ pub trait ItemCanonicalPath {
 /// up to (but not including) the implicit root module.
 pub trait ItemAncestors {
     /// Get an iterable over this item's ancestors.
-    fn ancestors<'a, 'b>(&self, ctx: &'a BindgenContext<'b>) -> ItemAncestorsIter<'a, 'b>;
+    fn ancestors<'a, 'b>(&self,
+                         ctx: &'a BindgenContext<'b>)
+                         -> ItemAncestorsIter<'a, 'b>;
 }
 
 /// An iterator over an item and its ancestors.
@@ -86,7 +88,8 @@ impl ItemId {
     /// Allocate the next `ItemId`.
     pub fn next() -> Self {
         static NEXT_ITEM_ID: AtomicUsize = ATOMIC_USIZE_INIT;
-        ItemId(NEXT_ITEM_ID.fetch_add(1, Ordering::Relaxed))
+        let next_id = NEXT_ITEM_ID.fetch_add(1, Ordering::Relaxed);
+        ItemId(next_id)
     }
 }
 
@@ -328,6 +331,12 @@ impl Item {
         self.kind().expect_type()
     }
 
+    /// Get a reference to this item's underlying `Type`, or `None` if this is
+    /// some other kind of item.
+    pub fn as_type(&self) -> Option<&Type> {
+        self.kind().as_type()
+    }
+
     /// Get a reference to this item's underlying `Function`. Panic if this is
     /// some other kind of item.
     pub fn expect_function(&self) -> &Function {
@@ -528,6 +537,11 @@ impl Item {
         ctx.opaque_by_name(&self.real_canonical_name(ctx, false, true))
     }
 
+    /// Is this a reference to another type?
+    pub fn is_type_ref(&self) -> bool {
+        self.as_type().map_or(false, |ty| ty.is_type_ref())
+    }
+
     /// Get the canonical name without taking into account the replaces
     /// annotation.
     ///
@@ -539,11 +553,11 @@ impl Item {
     ///
     /// This name should be derived from the immutable state contained in the
     /// type and the parent chain, since it should be consistent.
-    fn real_canonical_name(&self,
-                           ctx: &BindgenContext,
-                           count_namespaces: bool,
-                           for_name_checking: bool)
-                           -> String {
+    pub fn real_canonical_name(&self,
+                               ctx: &BindgenContext,
+                               count_namespaces: bool,
+                               for_name_checking: bool)
+                               -> String {
         let base_name = match *self.kind() {
             ItemKind::Type(ref ty) => {
                 match *ty.kind() {
@@ -799,12 +813,7 @@ impl ClangItemParser for Item {
         // Types are sort of special, so to avoid parsing template classes
         // twice, handle them separately.
         {
-            let definition = cursor.definition();
-            let applicable_cursor = if definition.is_valid() {
-                definition
-            } else {
-                cursor
-            };
+            let applicable_cursor = cursor.definition().unwrap_or(cursor);
             match Self::from_ty(&applicable_cursor.cur_type(),
                                 Some(applicable_cursor),
                                 parent_id,
@@ -823,6 +832,9 @@ impl ClangItemParser for Item {
             // too noisy about this.
             match cursor.kind() {
                 CXCursor_MacroDefinition |
+                CXCursor_MacroExpansion |
+                CXCursor_UsingDeclaration |
+                CXCursor_StaticAssert |
                 CXCursor_InclusionDirective => {
                     debug!("Unhandled cursor kind {:?}: {:?}",
                            cursor.kind(),
@@ -935,12 +947,7 @@ impl ClangItemParser for Item {
 
         let decl = {
             let decl = ty.declaration();
-            let definition = decl.definition();
-            if definition.is_valid() {
-                definition
-            } else {
-                decl
-            }
+            decl.definition().unwrap_or(decl)
         };
 
         let comment = decl.raw_comment()
@@ -1016,11 +1023,11 @@ impl ClangItemParser for Item {
                         assert_eq!(popped_decl, declaration_to_look_for);
                     }
 
-                    location.visit(|cur, _other| {
+                    location.visit(|cur| {
                         use clangll::*;
                         result = Item::from_ty_with_id(id,
                                                        ty,
-                                                       Some(*cur),
+                                                       Some(cur),
                                                        parent_id,
                                                        ctx);
                         match result {

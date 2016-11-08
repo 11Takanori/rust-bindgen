@@ -512,10 +512,11 @@ impl CompInfo {
             }
         };
 
-        ci.ref_template = Item::parse(cursor.specialized(), None, ctx).ok();
+        ci.ref_template = cursor.specialized()
+            .and_then(|c| Item::parse(c, None, ctx).ok());
 
         let mut maybe_anonymous_struct_field = None;
-        cursor.visit(|cur, _other| {
+        cursor.visit(|cur| {
             if cur.kind() != CXCursor_FieldDecl {
                 if let Some((ty, _)) = maybe_anonymous_struct_field {
                     let field = Field::new(None, ty, None, None, None, false);
@@ -529,7 +530,7 @@ impl CompInfo {
                     match maybe_anonymous_struct_field.take() {
                         Some((ty, clang_ty)) => {
                             let mut used = false;
-                            cur.visit(|child, _| {
+                            cur.visit(|child| {
                                 if child.cur_type() == clang_ty {
                                     used = true;
                                 }
@@ -550,12 +551,12 @@ impl CompInfo {
 
                     let bit_width = cur.bit_width();
                     let field_type = Item::from_ty_or_ref(cur.cur_type(),
-                                                          Some(*cur),
+                                                          Some(cur),
                                                           Some(potential_id),
                                                           ctx);
 
                     let comment = cur.raw_comment();
-                    let annotations = Annotations::new(cur);
+                    let annotations = Annotations::new(&cur);
                     let name = cur.spelling();
                     let is_mutable = cursor.is_mutable_field();
 
@@ -575,7 +576,7 @@ impl CompInfo {
                     ci.fields.push(field);
 
                     // No we look for things like attributes and stuff.
-                    cur.visit(|cur, _| {
+                    cur.visit(|cur| {
                         if cur.kind() == CXCursor_UnexposedAttr {
                             ci.found_unknown_attr = true;
                         }
@@ -593,7 +594,7 @@ impl CompInfo {
                 CXCursor_UnionDecl |
                 CXCursor_ClassTemplate |
                 CXCursor_ClassDecl => {
-                    let inner = Item::parse(*cur, Some(potential_id), ctx)
+                    let inner = Item::parse(cur, Some(potential_id), ctx)
                         .expect("Inner ClassDecl");
                     if !ci.inner_types.contains(&inner) {
                         ci.inner_types.push(inner);
@@ -619,7 +620,7 @@ impl CompInfo {
                     }
 
                     let default_type = Item::from_ty(&cur.cur_type(),
-                                                     Some(*cur),
+                                                     Some(cur),
                                                      Some(potential_id),
                                                      ctx)
                         .ok();
@@ -687,7 +688,7 @@ impl CompInfo {
                     // NB: This gets us an owned `Function`, not a
                     // `FunctionSig`.
                     let method_signature =
-                        Item::parse(*cur, Some(potential_id), ctx)
+                        Item::parse(cur, Some(potential_id), ctx)
                             .expect("CXXMethod");
 
                     let is_const = cur.method_is_const();
@@ -726,7 +727,7 @@ impl CompInfo {
                         return CXChildVisit_Continue;
                     }
 
-                    let item = Item::parse(*cur, Some(potential_id), ctx)
+                    let item = Item::parse(cur, Some(potential_id), ctx)
                         .expect("VarDecl");
                     ci.inner_vars.push(item);
                 }

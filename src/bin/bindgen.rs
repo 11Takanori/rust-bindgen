@@ -8,7 +8,7 @@ extern crate log;
 extern crate clang_sys;
 extern crate rustc_serialize;
 
-use bindgen::{BindgenOptions, Bindings, LinkType};
+use bindgen::{BindgenOptions, Bindings, LinkType, clang_version};
 use std::default::Default;
 use std::env;
 use std::fs;
@@ -63,9 +63,16 @@ Options:
     --use-msvc-mangling           Handle MSVC C++ ABI mangling; requires that
                                   target be set to (i686|x86_64)-pc-win32
 
+    --no-convert-floats           Don't convert floats automatically to f32/f64.
+
     --raw-line=<raw>              Add a raw line at the beginning of the output.
 
     --no-unstable-rust            Avoid generating unstable rust.
+
+    --use-core                    Use built-in types from core instead of std.
+
+    --ctypes-prefix=<prefix>      Use the given prefix before the raw types
+                                  instead of ::std::os::raw::.
 
     --opaque-type=<type>          Mark a type as opaque.
 
@@ -180,8 +187,19 @@ fn parse_args_or_exit(args: Vec<String>) -> (BindgenOptions, Box<io::Write>) {
             "--no-unstable-rust" => {
                 options.unstable_rust = false;
             }
+            "--use-core" => {
+                options.use_core = true;
+            }
+            "--ctypes-prefix" => {
+                let prefix = iter.next()
+                    .expect("--ctypes-prefix expects a prefix after it");
+                options.ctypes_prefix = Some(prefix);
+            }
             "--emit-clang-ast" => {
                 options.emit_ast = true;
+            }
+            "--no-convert-floats" => {
+                options.convert_floats = false;
             }
             "--use-msvc-mangling" => {
                 options.msvc_mangling = true;
@@ -231,6 +249,25 @@ pub fn main() {
         .expect("Failed to set logger.");
 
     let mut bind_args: Vec<_> = env::args().collect();
+
+    let version = clang_version();
+    let expected_version = if cfg!(feature = "llvm_stable") {
+        (3, 8)
+    } else {
+        (3, 9)
+    };
+
+    info!("Clang Version: {}", version.full);
+
+    match version.parsed {
+        None => warn!("Couldn't parse libclang version"),
+        Some(version) if version != expected_version => {
+            error!("Using clang {:?}, expected {:?}",
+                   version,
+                   expected_version);
+        }
+        _ => {}
+    }
 
     if let Some(clang) = clang_sys::support::Clang::find(None) {
         let has_clang_args =

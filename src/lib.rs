@@ -204,9 +204,27 @@ impl Builder {
         self
     }
 
+    /// Avoid converting floats to f32/f64 by default.
+    pub fn no_convert_floats(mut self) -> Self {
+        self.options.convert_floats = false;
+        self
+    }
+
     /// Avoid generating any unstable Rust in the generated bindings.
     pub fn no_unstable_rust(mut self) -> Builder {
         self.options.unstable_rust = false;
+        self
+    }
+
+    /// Use core instead of libstd in the generated bindings.
+    pub fn use_core(mut self) -> Builder {
+        self.options.use_core = true;
+        self
+    }
+
+    /// Use the given prefix for the raw types instead of `::std::os::raw`.
+    pub fn ctypes_prefix<T: Into<String>>(mut self, prefix: T) -> Builder {
+        self.options.ctypes_prefix = Some(prefix.into());
         self
     }
 
@@ -273,12 +291,21 @@ pub struct BindgenOptions {
     /// cannot.
     pub unstable_rust: bool,
 
+    /// True if we should avoid using libstd to use libcore instead.
+    pub use_core: bool,
+
+    /// An optional prefix for the "raw" types, like `c_int`, `c_void`...
+    pub ctypes_prefix: Option<String>,
+
     /// True if we should generate constant names that are **directly** under
     /// namespaces.
     pub namespaced_constants: bool,
 
     /// True if we should use MSVC name mangling rules.
     pub msvc_mangling: bool,
+
+    /// Whether we should convert float types to f32/f64 types.
+    pub convert_floats: bool,
 
     /// The set of raw lines to prepend to the generated Rust code.
     pub raw_lines: Vec<String>,
@@ -310,8 +337,11 @@ impl Default for BindgenOptions {
             derive_debug: true,
             enable_cxx_namespaces: false,
             unstable_rust: true,
+            use_core: false,
+            ctypes_prefix: None,
             namespaced_constants: true,
             msvc_mangling: false,
+            convert_floats: true,
             raw_lines: vec![],
             clang_args: vec![],
             input_header: None,
@@ -461,7 +491,7 @@ pub fn parse_one(ctx: &mut BindgenContext,
         Ok(id) => children.push(id),
         Err(ParseError::Continue) => {}
         Err(ParseError::Recurse) => {
-            cursor.visit(|child, _| parse_one(ctx, *child, parent, children));
+            cursor.visit(|child| parse_one(ctx, child, parent, children));
         }
     }
     CXChildVisit_Continue
@@ -480,14 +510,53 @@ fn parse(context: &mut BindgenContext) {
 
     let cursor = context.translation_unit().cursor();
     if context.options().emit_ast {
-        cursor.visit(|cur, _| clang::ast_dump(cur, 0));
+        cursor.visit(|cur| clang::ast_dump(&cur, 0));
     }
 
     let root = context.root_module();
     context.with_module(root, |context, children| {
-        cursor.visit(|cursor, _| parse_one(context, *cursor, None, children))
+        cursor.visit(|cursor| parse_one(context, cursor, None, children))
     });
 
     assert!(context.current_module() == context.root_module(),
             "How did this happen?");
+}
+
+/// Extracted Clang version data
+#[derive(Debug)]
+pub struct ClangVersion {
+    /// Major and minor semvar, if parsing was successful
+    pub parsed: Option<(u32, u32)>,
+    /// full version string
+    pub full: String,
+}
+
+/// Get the major and the minor semvar numbers of Clang's version
+pub fn clang_version() -> ClangVersion {
+    let raw_v: String = clang::extract_clang_version();
+    let split_v: Option<Vec<&str>> = raw_v.split_whitespace()
+        .nth(2)
+        .map(|v| v.split('.').collect());
+    match split_v {
+        Some(v) => {
+            if v.len() >= 2 {
+                let maybe_major = v[0].parse::<u32>();
+                let maybe_minor = v[1].parse::<u32>();
+                match (maybe_major, maybe_minor) {
+                    (Ok(major), Ok(minor)) => {
+                        return ClangVersion {
+                            parsed: Some((major, minor)),
+                            full: raw_v.clone(),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None => {}
+    };
+    ClangVersion {
+        parsed: None,
+        full: raw_v.clone(),
+    }
 }

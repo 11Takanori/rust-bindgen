@@ -8,6 +8,7 @@ import os
 import sys
 import subprocess
 import tempfile
+import shlex
 
 BINDGEN_FLAGS_PREFIX = "// bindgen-flags: "
 
@@ -94,7 +95,7 @@ def get_bindgen_flags(header_path):
     with open(header_path) as f:
         for line in f:
             if line.startswith(BINDGEN_FLAGS_PREFIX):
-                flags.extend(line.strip().split(BINDGEN_FLAGS_PREFIX)[1].split(" "))
+                flags.extend(shlex.split(line.strip().split(BINDGEN_FLAGS_PREFIX)[1]))
                 break
 
     return flags
@@ -129,16 +130,6 @@ def generate_bindings(bindgen, dummy_uses, flags, header, output):
     command.extend(flags)
     command.append(header)
     run_cmd(command, cwd=os.getcwd(), env=make_bindgen_env())
-
-def test_generated_bindings(bindings):
-    """Run the generated bindings's #[test]s."""
-    name = None
-    # Do not delete the temp file, because we need to end the with block before
-    # we can run the tests.
-    with tempfile.NamedTemporaryFile(delete=False) as tests:
-        name = tests.name
-        run_cmd(["rustc", "--test", bindings, "-o", name])
-    run_cmd([name])
 
 def check_actual_vs_expected(expected_bindings, rust_bindings_path):
     """
@@ -177,7 +168,6 @@ def main():
                       test_flags,
                       args.header,
                       args.rust_bindings)
-    test_generated_bindings(args.rust_bindings)
     check_actual_vs_expected(expected_bindings, args.rust_bindings)
     sys.exit(0)
 

@@ -136,6 +136,15 @@ impl Type {
         self.is_const
     }
 
+    /// Is this a reference to another type?
+    pub fn is_type_ref(&self) -> bool {
+        match self.kind {
+            TypeKind::ResolvedTypeRef(_) |
+            TypeKind::UnresolvedTypeRef(_, _, _) => true,
+            _ => false,
+        }
+    }
+
     /// What is the layout of this type?
     pub fn layout(&self, ctx: &BindgenContext) -> Option<Layout> {
         use std::mem;
@@ -547,14 +556,14 @@ impl Type {
                             let mut inner = Err(ParseError::Continue);
                             let mut args = vec![];
 
-                            location.visit(|cur, _| {
+                            location.visit(|cur| {
                                 match cur.kind() {
                                     CXCursor_TypeAliasDecl => {
                                         debug_assert!(cur.cur_type().kind() ==
                                                       CXType_Typedef);
                                         inner =
                                             Item::from_ty(&cur.cur_type(),
-                                                          Some(*cur),
+                                                          Some(cur),
                                                           Some(potential_id),
                                                           ctx);
                                     }
@@ -567,7 +576,7 @@ impl Type {
 
                                         let default_type =
                                             Item::from_ty(&cur.cur_type(),
-                                                          Some(*cur),
+                                                          Some(cur),
                                                           Some(potential_id),
                                                           ctx)
                                                 .ok();
@@ -677,7 +686,7 @@ impl Type {
             // process of resolving them.
             CXType_MemberPointer |
             CXType_Pointer => {
-                let inner = Item::from_ty_or_ref(ty.pointee_type(),
+                let inner = Item::from_ty_or_ref(ty.pointee_type().unwrap(),
                                                  location,
                                                  parent_id,
                                                  ctx);
@@ -688,7 +697,7 @@ impl Type {
             // can even add bindings for that, so huh.
             CXType_RValueReference |
             CXType_LValueReference => {
-                let inner = Item::from_ty_or_ref(ty.pointee_type(),
+                let inner = Item::from_ty_or_ref(ty.pointee_type().unwrap(),
                                                  location,
                                                  parent_id,
                                                  ctx);
